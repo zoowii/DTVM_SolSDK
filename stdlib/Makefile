@@ -1,3 +1,4 @@
+# must use clang 16
 CC=clang
 DEBUG_FLAGS=-g -O0
 RELEASE_FLAGS=-O2 -DNDEBUG

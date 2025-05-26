@@ -9,3 +9,6 @@
 /*.cbin.hex
 /*.wat
 /*.tar.gz
+
+# tmp ignore WasmTestVM.sol
+/src/WasmTestVM.sol
