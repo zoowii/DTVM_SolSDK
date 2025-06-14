@@ -3491,6 +3491,8 @@ dependencies = [
  "parity-wasm",
  "rand 0.9.1",
  "regex",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "wizer",
