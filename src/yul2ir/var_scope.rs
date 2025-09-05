@@ -45,7 +45,7 @@ impl<'a, 'b> ScopeGuard<'a, 'b> {
     }
 }
 
-impl<'a, 'b> Drop for ScopeGuard<'a, 'b> {
+impl Drop for ScopeGuard<'_, '_> {
     fn drop(&mut self) {
         self.context.exit_scope();
     }

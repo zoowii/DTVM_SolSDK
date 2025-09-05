@@ -24,6 +24,8 @@ use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, Point
 
 use super::yul_instruction::{YulLowLevelFunctionType, YulLowLevelValue, YulLowLevelValueType};
 
+pub const UNIFIED_REVERT_ERROR_ZERO: &str = "$unified_revert_error_zero";
+
 /// Checks if an object contains any sub-contracts.
 /// A sub-contract is defined as any nested object that is not a deployed contract
 /// (i.e., its name doesn't end with "_deployed").
@@ -48,8 +50,9 @@ pub fn has_sub_contract(object: &Object) -> bool {
 #[allow(unused)]
 impl<'a> Yul2IRContext<'a> {
     pub(crate) fn walk_block(&self, yul_func_name: &str, block: &Block) -> CompileResult<'a> {
+        let _scope_guard = ScopeGuard::new(self);
         for stmt in &block.statements {
-            self.walk_stmt(yul_func_name, stmt);
+            self.walk_stmt(yul_func_name, stmt)?;
         }
         self.ok_result()
     }
@@ -195,22 +198,29 @@ impl<'a> Yul2IRContext<'a> {
     }
 
     fn walk_for(&self, yul_func_name: &str, r#for: &ast::For) -> CompileResult<'a> {
-        self.walk_block(yul_func_name, &r#for.init_block);
+        let _scope_guard = ScopeGuard::new(self);
+
+        let _init_scope_guard = ScopeGuard::new(self);
+        for stmt in &r#for.init_block.statements {
+            self.walk_stmt(yul_func_name, stmt)?;
+        }
         let cur_func = self.current_function.borrow().clone().unwrap();
         let cur_func_value = *cur_func.clone();
         let cond_block = self
             .llvm_context
             .append_basic_block(cur_func_value, "for_cond");
-        self.push_control_flow_continue_bb(cond_block);
+
         let body_block = self
             .llvm_context
             .append_basic_block(cur_func_value, "for_body");
+
+        let update_block = self
+            .llvm_context
+            .append_basic_block(cur_func_value, "for_update");
+
         let end_block = self
             .llvm_context
             .append_basic_block(cur_func_value, "for_end");
-
-        // Push the control flow end block onto the stack to facilitate break/continue in control flow
-        self.push_control_flow_end_bb(end_block);
 
         self.builder
             .borrow_mut()
@@ -232,8 +242,22 @@ impl<'a> Yul2IRContext<'a> {
             .build_conditional_branch(bool_cond_value, body_block, end_block);
 
         self.builder.borrow_mut().position_at_end(body_block);
-        self.walk_block(yul_func_name, &r#for.execution_block);
-        self.walk_block(yul_func_name, &r#for.post_block);
+        // Push the control flow end block onto the stack to facilitate break/continue in control flow
+        self.push_control_flow_end_bb(end_block);
+        self.push_control_flow_continue_bb(update_block);
+
+        let _body_scope_guard = ScopeGuard::new(self);
+        self.walk_block(yul_func_name, &r#for.execution_block)?;
+
+        self.builder
+            .borrow_mut()
+            .build_unconditional_branch(update_block);
+
+        self.builder.borrow_mut().position_at_end(update_block);
+
+        let _post_scope_guard = ScopeGuard::new(self);
+        self.walk_block(yul_func_name, &r#for.post_block)?;
+
         self.builder
             .borrow_mut()
             .build_unconditional_branch(cond_block);
@@ -316,10 +340,9 @@ impl<'a> Yul2IRContext<'a> {
                     .collect::<Vec<BasicTypeEnum<'a>>>()
             }
             _ => {
-                return Err(ASTLoweringError {
-                    message: "tuple variable assign value now only support function call"
-                        .to_string(),
-                });
+                return Err(ASTLoweringError::BuilderError(
+                    "tuple variable assign value now only support function call".to_string(),
+                ));
             }
         };
 
@@ -497,7 +520,7 @@ impl<'a> Yul2IRContext<'a> {
             let var_low_level_value_type = YulLowLevelValueType::Bytes32Pointer;
             let ty = self.bytes32_pointer_type().as_basic_type_enum();
             let llvm_var = self.fast_alloca(ty, &format!("var_{name}"))?;
-            self.set_var(&name, ty, var_low_level_value_type, llvm_var, false);
+            self.set_var(&name, ty, var_low_level_value_type, llvm_var, false)?;
             self.build_store(llvm_var, init_val_low_level.unwrap().value)?;
             return self.ok_result();
         }
@@ -563,7 +586,7 @@ impl<'a> Yul2IRContext<'a> {
         };
 
         let llvm_var = self.fast_alloca(ty, &format!("var_{name}"))?;
-        self.set_var(&name, ty, var_low_level_value_type, llvm_var, false);
+        self.set_var(&name, ty, var_low_level_value_type, llvm_var, false)?;
 
         if init_val_low_level.is_some()
             && init_val_low_level.unwrap().value_type == YulLowLevelValueType::Bytes32Pointer
@@ -610,10 +633,10 @@ impl<'a> Yul2IRContext<'a> {
                         .collect::<Vec<BasicTypeEnum<'a>>>()
                 }
                 _ => {
-                    return Err(ASTLoweringError {
-                        message: "tuple variable declaration value now only support function call"
+                    return Err(ASTLoweringError::BuilderError(
+                        "tuple variable declaration value now only support function call"
                             .to_string(),
-                    })
+                    ));
                 }
             });
         }
@@ -667,7 +690,7 @@ impl<'a> Yul2IRContext<'a> {
                 new_var_low_level_value_type,
                 new_var,
                 false,
-            );
+            )?;
 
             let item = match ty {
                 Some(ty) => {
@@ -755,6 +778,20 @@ impl<'a> Yul2IRContext<'a> {
         func_call: &ast::FunctionCall,
     ) -> CompileResult<'a> {
         let func_name = func_call.id.name.clone();
+        let qualifier_func_name = self.get_func_decl_qualifier_name_by_str(&func_name);
+
+        if self
+            .revert_zero_functions
+            .borrow()
+            .contains(&qualifier_func_name)
+        {
+            self.build_void_call(UNIFIED_REVERT_ERROR_ZERO, &[])?;
+            return Ok(YulLowLevelValue {
+                value_type: YulLowLevelValueType::I32,
+                value: self.i32_type().const_zero().into(),
+            });
+        }
+
         if let Some(instr) = parse_intrinsic_func_name(&func_name) {
             let yul_generated_expr = self.walk_yul_instruction(
                 yul_func_name,
@@ -832,12 +869,16 @@ impl<'a> Yul2IRContext<'a> {
             }
         }
 
-        let qualifier_func_name = self.get_func_decl_qualifier_name_by_str(&func_name);
         let infered_yul_func_ty = self
             .yul_func_infer_types
             .borrow()
             .get(&qualifier_func_name)
-            .unwrap()
+            .ok_or_else(|| {
+                ASTLoweringError::BuilderError(format!(
+                    "Called function '{}' definition not found in module '{}'",
+                    func_name, module_name
+                ))
+            })?
             .clone();
 
         let mut call_args = vec![];
@@ -1040,7 +1081,7 @@ impl<'a> Yul2IRContext<'a> {
         }
     }
 
-    fn ok_result(&self) -> CompileResult<'a> {
+    pub fn ok_result(&self) -> CompileResult<'a> {
         Ok(YulLowLevelValue {
             value_type: YulLowLevelValueType::I32,
             value: self.i32_type().const_zero().into(),
@@ -1241,7 +1282,7 @@ impl<'a> Yul2IRContext<'a> {
             return false;
         }
         //  log3
-        if self.matches_log3_statement(&stmts[17]).is_none() {
+        if self.matches_function_call(&stmts[17], "log3", 5).is_none() {
             return false;
         }
         true
@@ -1347,6 +1388,13 @@ impl<'a> Yul2IRContext<'a> {
                 self.yul_func_infer_types
                     .borrow_mut()
                     .insert(qualifier_func_name.clone(), func_low_level_type);
+
+                if self.is_revert_zero_function(func_def) {
+                    self.revert_zero_functions
+                        .borrow_mut()
+                        .insert(qualifier_func_name.clone());
+                    continue;
+                }
 
                 // Add function to module
                 let function = self.llvm_module.borrow_mut().add_function(
@@ -1506,6 +1554,8 @@ impl<'a> Yul2IRContext<'a> {
         if is_main {
             *self.main_module.borrow_mut() = module_name.clone();
         }
+
+        self.generate_unified_revert_zero()?;
 
         for func in object
             .code
@@ -1721,7 +1771,7 @@ impl<'a> Yul2IRContext<'a> {
                 param_low_level_value_type,
                 param_var_pointer,
                 false,
-            );
+            )?;
         }
         // Declare return variables
         for (i, ret_info) in function.returns.iter().enumerate() {
@@ -1751,7 +1801,7 @@ impl<'a> Yul2IRContext<'a> {
                 ret_var_low_level_value_type,
                 ret_var_pointer,
                 true,
-            );
+            )?;
         }
 
         if self.opts.enable_all_optimizers {

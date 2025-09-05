@@ -23,7 +23,7 @@ use inkwell::values::{
 };
 use inkwell::{AddressSpace, IntPredicate};
 use once_cell::sync::OnceCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ops::Add;
 use std::{cell::RefCell, rc::Rc};
@@ -73,6 +73,7 @@ pub struct Yul2IRContext<'ctx> {
 
     pub functions_mapping: RefCell<HashMap<String, Rc<FunctionValue<'ctx>>>>,
     pub current_func_decls: RefCell<IndexMap<String, FunctionDeclaration>>,
+    pub revert_zero_functions: RefCell<HashSet<String>>,
 
     // yul function name => yul low level function type
     pub yul_func_infer_types: RefCell<HashMap<String, YulLowLevelFunctionType<'ctx>>>,
@@ -134,6 +135,7 @@ impl<'ctx> Yul2IRContext<'ctx> {
             vars_scopes: RefCell::new(vec![]),
             functions_mapping: RefCell::new(Default::default()),
             current_func_decls: RefCell::new(Default::default()),
+            revert_zero_functions: RefCell::new(Default::default()),
             yul_func_infer_types: RefCell::new(Default::default()),
             iden_id_gen: RefCell::new(0),
             exported_func_names: RefCell::new(vec![]),
@@ -240,6 +242,10 @@ impl<'ctx> Yul2IRContext<'ctx> {
     }
 
     fn emit_code(&mut self, output_basename: &str) -> Result<String, Box<dyn Error>> {
+        if let Err(e) = self.transform() {
+            return Err(format!("Transform error: {}", e).into());
+        }
+
         self.transform().unwrap();
         // Run LLVM pass on the LLVM module.
         self.run_llvm_passes();
@@ -357,9 +363,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
                 if let Some(res) = res.try_as_basic_value().left() {
                     Ok(res)
                 } else {
-                    Err(ASTLoweringError {
-                        message: format!("{FUNCTION_RETURN_VALUE_NOT_FOUND_MSG}: {name}"),
-                    })
+                    Err(ASTLoweringError::FunctionReturnValueNotFound(format!(
+                        "{FUNCTION_RETURN_VALUE_NOT_FOUND_MSG}: {name}"
+                    )))
                 }
             }
             Err(err) => {
@@ -415,9 +421,7 @@ impl<'ctx> Yul2IRContext<'ctx> {
             "u256" | "uint256" => Ok(self.u256_type().into()),
             "bytes32" => Ok(self.u256_type().into()), // bytes32 is stored as u256 in EVM
             "address" => Ok(self.u256_type().into()), // address is u160 but stored as u256 in EVM
-            _ => Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", ty_name),
-            }),
+            _ => Err(ASTLoweringError::UnsupportedType(ty_name.to_string())),
         }
     }
 
@@ -506,8 +510,8 @@ impl<'ctx> Yul2IRContext<'ctx> {
     }
 
     pub fn string_literal(&self, value: &str) -> IntValue<'ctx> {
-        if value.len() > 31 {
-            // panic!("String literal length exceeds 31 bytes: {}", value);
+        if value.len() > 32 {
+            // panic!("String literal length exceeds 32 bytes: {}", value);
             // String literals used in linker symbol, data offset, and data size instructions
             // don't need to be processed by string_literal function
             // After modifying the logic in instruction.rs, we can restore the panic here
@@ -622,10 +626,15 @@ impl<'ctx> Yul2IRContext<'ctx> {
         }
     }
 
-    pub fn matches_log3_statement(&self, stmt: &Statement) -> Option<Vec<Expression>> {
+    pub fn matches_function_call(
+        &self,
+        stmt: &Statement,
+        name: &str,
+        args_count: usize,
+    ) -> Option<Vec<Expression>> {
         match stmt {
             Statement::FunctionCall(func_call) => {
-                if func_call.id.name == "log3" && func_call.arguments.len() == 5 {
+                if func_call.id.name == name && func_call.arguments.len() == args_count {
                     Some(func_call.arguments.clone())
                 } else {
                     None
@@ -696,13 +705,21 @@ impl<'ctx> Yul2IRContext<'ctx> {
         var_low_level_value_type: YulLowLevelValueType,
         var_pointer: PointerValue<'ctx>,
         is_return_var: bool,
-    ) {
-        if let Some(last_var_scope) = self.vars_scopes.borrow_mut().last() {
+    ) -> Result<(), ASTLoweringError> {
+        if let Some(last_var_scope) = self.vars_scopes.borrow_mut().last_mut() {
+            if last_var_scope.vars.borrow().contains_key(iden) {
+                return Err(ASTLoweringError::DuplicateVariableDefinition(format!(
+                    "Variable '{}' is already defined in this scope",
+                    iden
+                )));
+            }
+
             last_var_scope.vars.borrow_mut().insert(
                 iden.to_string(),
                 (var_ty, var_low_level_value_type, var_pointer, is_return_var),
             );
         }
+        Ok(())
     }
 
     // return (var_type, var_low_level_value_type, var_pointer, is_return_var)
@@ -825,9 +842,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
             // is bytes32 pointer
             self.bytes32_pointer_as_u256(value)
         } else {
-            Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", value.get_type()),
-            })
+            Err(ASTLoweringError::UnsupportedType(
+                value.get_type().to_string(),
+            ))
         }
     }
 
@@ -845,9 +862,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
             let bytes32_val = self.try_into_bytes32(value)?;
             self.try_into_i64(&bytes32_val)
         } else {
-            Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", value.get_type()),
-            })
+            Err(ASTLoweringError::UnsupportedType(
+                value.get_type().to_string(),
+            ))
         }
     }
 
@@ -902,9 +919,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
             let bytes32_val = self.try_into_bytes32(value)?;
             self.try_into_i32(&bytes32_val)
         } else {
-            Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", value.get_type()),
-            })
+            Err(ASTLoweringError::UnsupportedType(
+                value.get_type().to_string(),
+            ))
         }
     }
 
@@ -921,9 +938,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
             let bytes32_val = self.try_into_bytes32(value)?;
             self.bytes32_as_u256(&bytes32_val)
         } else {
-            Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", value.get_type()),
-            })
+            Err(ASTLoweringError::UnsupportedType(
+                value.get_type().to_string(),
+            ))
         }
     }
 
@@ -1046,9 +1063,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
             let res = self.build_load(ret_ty, ret_ptr, "")?;
             Ok(res.into_int_value())
         } else {
-            Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", value.get_type()),
-            })
+            Err(ASTLoweringError::UnsupportedType(
+                value.get_type().to_string(),
+            ))
         }
     }
 
@@ -1064,9 +1081,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
             let res = self.build_load(ret_ty, ret_ptr, "")?;
             Ok(res.into_int_value())
         } else {
-            Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", value.get_type()),
-            })
+            Err(ASTLoweringError::UnsupportedType(
+                value.get_type().to_string(),
+            ))
         }
     }
 
@@ -1085,9 +1102,9 @@ impl<'ctx> Yul2IRContext<'ctx> {
             let res = self.build_load(ret_ty, ret_ptr, "")?;
             Ok(res)
         } else {
-            Err(ASTLoweringError {
-                message: format!("Unsupported type: {}", value.get_type()),
-            })
+            Err(ASTLoweringError::UnsupportedType(
+                value.get_type().to_string(),
+            ))
         }
     }
 
@@ -1161,16 +1178,12 @@ impl<'ctx> Yul2IRContext<'ctx> {
                 .builder
                 .borrow_mut()
                 .build_int_z_extend(int_value, target_int_ty, "")
-                .map_err(|e| ASTLoweringError {
-                    message: e.to_string(),
-                });
+                .map_err(|e| ASTLoweringError::BuilderError(e.to_string()));
         }
         self.builder
             .borrow_mut()
             .build_int_cast(int_value, target_int_ty, "")
-            .map_err(|e| ASTLoweringError {
-                message: e.to_string(),
-            })
+            .map_err(|e| ASTLoweringError::BuilderError(e.to_string()))
     }
 
     #[allow(unused)]
@@ -1277,9 +1290,7 @@ impl<'ctx> Yul2IRContext<'ctx> {
         self.builder
             .borrow_mut()
             .build_alloca(ty, name)
-            .map_err(|e| ASTLoweringError {
-                message: e.to_string(),
-            })
+            .map_err(|e| ASTLoweringError::BuilderError(e.to_string()))
     }
 
     #[allow(dead_code)]
@@ -1304,9 +1315,7 @@ impl<'ctx> Yul2IRContext<'ctx> {
         self.builder
             .borrow_mut()
             .build_load(pointee_ty, ptr, name)
-            .map_err(|e| ASTLoweringError {
-                message: e.to_string(),
-            })
+            .map_err(|e| ASTLoweringError::BuilderError(e.to_string()))
     }
 
     pub fn get_value_pointer<T: BasicValue<'ctx>>(

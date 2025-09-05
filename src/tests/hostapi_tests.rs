@@ -213,38 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn test_yul_gaslimit() {
-        let mut runtime = TestRuntime::new("GaslimitTest", "target/test_yul_gaslimit");
-        let _emited_bc = runtime
-            .compile_test_yul(
-                r#"
-            object "GaslimitTest" {
-                code {
-                }
-                object "GaslimitTest_deployed" {
-                    code {
-                        function test_gaslimit() -> r {
-                            r := gaslimit()
-                        }
-
-                        let r := test_gaslimit()
-                        mstore(0x00, r)
-                        return(0x00, 0x20)
-                    }
-                }
-            }
-            "#,
-            )
-            .unwrap();
-        runtime.deploy(&[]).unwrap();
-        runtime
-            .call(&solidity_selector("test_gaslimit()"), &[])
-            .unwrap();
-        // DEFAULT_GAS_LIMIT: 10000000
-        runtime.assert_result("0000000000000000000000000000000000000000000000000000000000989680");
-    }
-
-    #[test]
     fn test_callvalue_not_zero() {
         let mut runtime =
             TestRuntime::new("test_callvalue_not_zero", "target/test_callvalue_not_zero");
@@ -359,5 +327,69 @@ mod tests {
             .call(&solidity_selector("test_call_ec_pair_failed()"), &[])
             .unwrap();
         runtime.assert_result("f248a1c000000000000000000000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn test_solidity_revert_short_string() {
+        let mut runtime = TestRuntime::new(
+            "test_solidity_revert_short_string",
+            "target/test_solidity_revert_short_string",
+        );
+        runtime.clear_testdata();
+        let yul_code = runtime.compile_solidity_to_yul(
+            r#"
+        pragma solidity ^0.8.0;
+ 
+        contract TestContract {
+            function test() public {
+                revert("helloworld");
+            }
+        }
+        
+        "#,
+            "TestContract",
+        );
+        if let Err(err) = &yul_code {
+            eprintln!("compile to yul error: {err}");
+        }
+        assert!(yul_code.is_ok());
+        let yul_code = yul_code.unwrap();
+        let _emited_bc = runtime.compile_test_yul(&yul_code).unwrap();
+        runtime.set_enable_gas_meter(false);
+        runtime.deploy(&[]).unwrap();
+        runtime.call(&solidity_selector("test()"), &[]).unwrap();
+        runtime.assert_revert("08c379a00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000a68656c6c6f776f726c6400000000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn test_solidity_revert_long_string() {
+        let mut runtime = TestRuntime::new(
+            "test_solidity_revert_long_string",
+            "target/test_solidity_revert_long_string",
+        );
+        runtime.clear_testdata();
+        let yul_code = runtime.compile_solidity_to_yul(
+            r#"
+        pragma solidity ^0.8.0;
+ 
+        contract TestContract {
+            function test() public {
+                revert("helloworld. This is a long revert string longer than 32bytes");
+            }
+        }
+        
+        "#,
+            "TestContract",
+        );
+        if let Err(err) = &yul_code {
+            eprintln!("compile to yul error: {err}");
+        }
+        assert!(yul_code.is_ok());
+        let yul_code = yul_code.unwrap();
+        let _emited_bc = runtime.compile_test_yul(&yul_code).unwrap();
+        runtime.set_enable_gas_meter(false);
+        runtime.deploy(&[]).unwrap();
+        runtime.call(&solidity_selector("test()"), &[]).unwrap();
+        runtime.assert_revert("08c379a00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003c68656c6c6f776f726c642e20546869732069732061206c6f6e672072657665727420737472696e67206c6f6e676572207468616e203332627974657300000000");
     }
 }

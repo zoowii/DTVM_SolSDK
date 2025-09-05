@@ -22,14 +22,12 @@ fn check_args_count(
     expected: usize,
 ) -> Result<(), ASTLoweringError> {
     if args.len() != expected {
-        return Err(ASTLoweringError {
-            message: format!(
-                "Instruction {:?} Expected {} arguments, but got {}",
-                instr,
-                expected,
-                args.len()
-            ),
-        });
+        return Err(ASTLoweringError::BuilderError(format!(
+            "Instruction {:?} Expected {} arguments, but got {}",
+            instr,
+            expected,
+            args.len()
+        )));
     }
     Ok(())
 }
@@ -594,10 +592,10 @@ impl<'a> Yul2IRContext<'a> {
                         .builder
                         .borrow_mut()
                         .build_int_add(lhs, rhs, "add_result")?;
-                    return Ok(YulLowLevelValue {
+                    Ok(YulLowLevelValue {
                         value_type: YulLowLevelValueType::from_int_type(result.get_type()),
                         value: result.into(),
-                    });
+                    })
                 } else if (self.is_bytes32_value(lhs) || self.is_bytes32_pointer_value(lhs))
                     && (self.is_bytes32_value(rhs) || self.is_bytes32_pointer_value(rhs))
                 {
@@ -625,7 +623,7 @@ impl<'a> Yul2IRContext<'a> {
                         value_type: YulLowLevelValueType::from_int_type(result.get_type()),
                         value: result.into(),
                     });
-                };
+                }
             }
             YulInstructionName::Sub => {
                 check_args_count(&instr, &args, 2)?;

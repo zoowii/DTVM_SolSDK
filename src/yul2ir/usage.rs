@@ -8,7 +8,7 @@ use super::{
     context::{UsageInfo, Yul2IRContext},
 };
 
-impl<'a> Yul2IRContext<'a> {
+impl Yul2IRContext<'_> {
     /// Variable Usage Analysis Functions (Free Functions)
     #[allow(unused)]
     fn analyze_expression_usage(expr: &Expression, usage_info: &mut HashMap<String, UsageInfo>) {
