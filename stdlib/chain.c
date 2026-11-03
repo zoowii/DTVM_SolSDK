@@ -191,8 +191,7 @@ void wrapper_block_coin_base(bytes32 *result) {
 }
 
 void wrapper_block_prevRandao(bytes32 *result) {
-  getBlockPrevRandao(12 + (ADDRESS_UINT)result); // 32 bytes
-  clear_first_12_bytes(result);
+  getBlockPrevRandao((ADDRESS_UINT)result); // 32 bytes
 }
 
 void wrapper_callvalue(uint256_t *result) {

@@ -6,6 +6,6 @@ if [ "$1" = "prepare" ]; then
   ls
 else
   cd docker
-  docker build . --platform linux/x86_64 -f Dockerfile -t dtvmdev1/dtvm-sol-dev-x64:1.83.0
+  docker build . --platform linux/x86_64 -f Dockerfile -t dtvmdev1/dtvm-sol-dev-x64:1.84.0
   cd ..
 fi

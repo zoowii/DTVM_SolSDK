@@ -13,7 +13,7 @@ jobs:
     name: Build, Create Release, and Upload Artifact
     runs-on: ubuntu-latest
     container:
-      image: dtvmdev1/dtvm-sol-dev-x64:1.83.0
+      image: dtvmdev1/dtvm-sol-dev-x64:1.84.0
     steps:
       - name: Check out code
         uses: actions/checkout@v4

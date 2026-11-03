@@ -22,7 +22,7 @@ RUN ./emsdk activate 3.1.69
 
 RUN curl -sSf https://mirrors.ustc.edu.cn/misc/rustup-install.sh | sh -s -- -y
 RUN bash -c ". /root/.cargo/env"
-RUN bash -c ". ~/.cargo/env && rustup install 1.83.0 && rustup default 1.83.0"
+RUN bash -c ". ~/.cargo/env && rustup install 1.84.0 && rustup default 1.84.0"
 WORKDIR /home/admin
 
 WORKDIR /opt
